@@ -1,0 +1,84 @@
+name: Darwin release assets (cargo)
+
+# Builds the aspect-cli darwin binaries for an existing release tag and
+# uploads them next to the linux musl asset, so the repo-pinning
+# launcher (`github(org = "VideoAmp", repo = "aspect-cli")` pins in
+# consumer repos, e.g. VideoAmp/central's .aspect/version.axl) can
+# resolve the pin on macOS dev machines too.
+#
+# The inherited upstream "Build Release Artifacts" workflow can't run
+# here: it needs aspect-build's ubuntu-22.04-16core large runners and a
+# bazel bootstrap. A plain cargo build on a GitHub-hosted macOS runner
+# reproduces the same release profile (workspace Cargo.toml:
+# lto = "fat", codegen-units = 1, opt-level = "z") and the same toolchain
+# line as the musl build (rust:1.98-alpine).
+#
+# Asset names match what the launcher derives by LLVM target triple
+# (crates/aspect-launcher/src/main.rs, default_artifact):
+#   aspect-cli-aarch64-apple-darwin
+#   aspect-cli-x86_64-apple-darwin
+# plus .sha256 sidecars in shasum(1) format, mirroring the existing
+# linux assets on the same release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and attach darwin assets to'
+        required: true
+        default: 'v2026.44.7-va1'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: macos-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 1
+
+      - name: Install pinned Rust toolchain (1.98 line, as the musl build)
+        run: |
+          rustup toolchain install 1.98 --profile minimal
+          rustup default 1.98
+          rustup target add ${{ matrix.target }}
+          rustc --version
+          cargo --version
+
+      - name: Build aspect-cli (release profile)
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin aspect-cli
+
+      - name: Strip, checksum, smoke
+        run: |
+          B="target/${{ matrix.target }}/release/aspect-cli"
+          strip "$B"
+          cp "$B" "aspect-cli-${{ matrix.target }}"
+          shasum -a 256 "aspect-cli-${{ matrix.target }}" > "aspect-cli-${{ matrix.target }}.sha256"
+          file "aspect-cli-${{ matrix.target }}"
+          # aarch64 runs natively on the runner; x86_64 needs Rosetta —
+          # informational smoke only, a Rosetta gap must not fail the job
+          "./aspect-cli-${{ matrix.target }}" --version \
+            || echo "(binary for ${{ matrix.target }} did not execute on this runner — check the file(1) output above)"
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" > /dev/null
+          gh release upload "${{ inputs.tag }}" \
+            "aspect-cli-${{ matrix.target }}" \
+            "aspect-cli-${{ matrix.target }}.sha256" \
+            --clobber

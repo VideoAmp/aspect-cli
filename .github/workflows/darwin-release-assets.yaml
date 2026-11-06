@@ -50,6 +50,28 @@ jobs:
           ref: ${{ inputs.tag }}
           fetch-depth: 1
 
+      # The workspace's .cargo/config.toml paths-overrides the patched
+      # starlark at target/patch/, which `cargo patch-crate` materializes
+      # from patches/ (see .github/actions/cargo-patch-crate upstream).
+      # Every cargo build in this repo needs this first.
+      - name: Restore patch-crate
+        id: patch-crate-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-patch-crate
+          key: ${{ runner.os }}-${{ runner.arch }}-patch-crate-0.1.13
+
+      # Outside the checkout: the repo's own .cargo/config.toml names the
+      # copy this is about to create, so cargo inside it fails until the
+      # patch exists.
+      - name: Install patch-crate
+        if: steps.patch-crate-cache.outputs.cache-hit != 'true'
+        working-directory: ${{ runner.temp }}
+        run: cargo install patch-crate --locked --version 0.1.13
+
+      - name: Apply patched crates
+        run: cargo patch-crate --force
+
       - name: Install pinned Rust toolchain (1.98 line, as the musl build)
         run: |
           rustup toolchain install 1.98 --profile minimal
